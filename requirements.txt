@@ -3,4 +3,4 @@ langchain
 langchain-google-genai
 faiss-cpu
 python-dotenv
-google-generative-ai
+langchain_google_genai
