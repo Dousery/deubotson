@@ -5,6 +5,7 @@ DEUbot is an AI-powered information assistant that answers questions about Dokuz
 
 ---
 ## 🚀 Live Demo
+https://deubot.streamlit.app
 
 ---
 ### ⚙️ Features
