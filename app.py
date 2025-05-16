@@ -35,7 +35,7 @@ def create_embeddings_from_pdfs():
             st.error(f"An error occurred while loading PDF files: {e}")
             return False
 
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
         texts = text_splitter.split_documents(documents)
         if not texts:
             st.error("Could not extract text from PDFs.")
@@ -191,7 +191,6 @@ def main():
                 conv = st.session_state.conversations.get(conv_id)
                 if conv:
                     button_label = conv.get('title', f"Chat {conv_id}")
-                    # FIXED LINE: changed "normal" to "tertiary"
                     if st.button(f"{button_label}", key=f"conv_{conv_id}", use_container_width=True,
                                  type="secondary" if st.session_state.active_conversation_id == conv_id else "tertiary"):
                         st.session_state.active_conversation_id = conv_id
