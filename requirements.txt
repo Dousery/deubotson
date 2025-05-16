@@ -6,3 +6,4 @@ python-dotenv
 langchain_google_genai
 langchain-community 
 langchain-core
+tqdm
