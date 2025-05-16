@@ -206,13 +206,13 @@ def main():
                     st.rerun()
                 else:
                     st.error("Database creation failed. Please check the PDF folder and API key.")
-        else:
-            if st.button("🔄 Update Database", use_container_width=True):
-                if create_embeddings_from_pdfs():
-                    st.success("Database updated successfully!")
-                    st.rerun()
-                else:
-                    st.error("Database update failed.")
+        #else:
+        #    if st.button("🔄 Update Database", use_container_width=True):
+        #        if create_embeddings_from_pdfs():
+        #            st.success("Database updated successfully!")
+        #            st.rerun()
+        #        else:
+        #            st.error("Database update failed.")
 
     if st.session_state.active_conversation_id is None and st.session_state.conversations:
         try:
