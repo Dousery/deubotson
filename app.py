@@ -9,23 +9,23 @@ from dotenv import load_dotenv
 import os
 import time
 import shutil
-
-# New imports
 from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
+from langchain.chains import create_retrieval_chain
+from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain_core.output_parsers import StrOutputParser
 
 load_dotenv()
 
 INDEX_DIRECTORY = "faiss_index"
 PDF_DIRECTORY = "pdfs"
 
-# Create FAISS index from PDF files
+# Create FAISS index from PDF files with improved chunking
 def create_embeddings_from_pdfs():
     if not os.path.exists(PDF_DIRECTORY) or not os.listdir(PDF_DIRECTORY):
         st.warning(f"'{PDF_DIRECTORY}' folder not found or there are no PDF files inside. Please add your PDFs to this folder.")
         return False
     with st.spinner(f"Creating embeddings from PDFs in the '{PDF_DIRECTORY}' folder... This may take some time."):
         try:
-            # use_multithreading=True can sometimes cause issues on Windows, set to False or remove if needed.
             loader = DirectoryLoader(PDF_DIRECTORY, glob="*.pdf", loader_cls=PyPDFLoader, show_progress=True, use_multithreading=False)
             documents = loader.load()
             if not documents:
@@ -35,7 +35,13 @@ def create_embeddings_from_pdfs():
             st.error(f"An error occurred while loading PDF files: {e}")
             return False
 
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
+        # Improved text splitting for better retrieval
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=800,  # Smaller chunks for better retrieval
+            chunk_overlap=200,  # More overlap for context preservation
+            length_function=len,
+            separators=["\n\n", "\n", " ", ""]
+        )
         texts = text_splitter.split_documents(documents)
         if not texts:
             st.error("Could not extract text from PDFs.")
@@ -51,72 +57,88 @@ def create_embeddings_from_pdfs():
             return False
     return True
 
-# Create conversation chain with retriever
-def get_chain(chat_memory=None):
+# Create RAG chain without conversational memory for better performance
+def get_rag_chain():
     embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
     if not os.path.exists(INDEX_DIRECTORY):
         st.error("FAISS index file not found. Please create embeddings first.")
-        return None, None
+        return None
     try:
         db = FAISS.load_local(INDEX_DIRECTORY, embeddings, allow_dangerous_deserialization=True)
     except Exception as e:
         st.error(f"Error loading FAISS index: {e}. The index file might be corrupted. Try recreating it from the sidebar.")
-        return None, None
+        return None
 
-    retriever = db.as_retriever(search_kwargs={"k": 5}) # Increase k to get more relevant documents
+    # Enhanced retriever with multiple search types
+    retriever = db.as_retriever(
+        search_type="mmr",  # Maximum Marginal Relevance for diverse results
+        search_kwargs={
+            "k": 8,  # Retrieve more documents
+            "lambda_mult": 0.7,  # Balance between relevance and diversity
+            "fetch_k": 20  # Fetch more candidates before filtering
+        }
+    )
 
-    if chat_memory is None:
-        memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True, output_key='answer')
-    else:
-        memory = chat_memory
+    system_message_content = """Sen Dokuz Eylül Üniversitesi'nin dijital asistanısın. Görerin sadece verilen "Context" bölümündeki bilgileri kullanarak kullanıcının sorularını yanıtlamak.
 
-    system_message_content = """You are an assistant bot providing information about Dokuz Eylül University. Your task is to answer the user's questions ONLY using the provided text excerpts.
+ÖNEMLİ KURALLAR:
+1. SADECE verilen "Context" bölümündeki bilgileri kullan. Kendi bilgilerini ASLA ekleme.
+2. Context'te yeterli bilgi yoksa, kibarca bilginin mevcut olmadığını belirt. TAHMİN YAPMA.
+3. Kullanıcının sorusunu dikkatlice analiz et ve context'teki ilgili bilgileri kapsamlı şekilde yanıtla.
+4. Yanıtını kullanıcının sorusunun dilinde ver:
+   - Soru Türkçe ise, Türkçe yanıtla
+   - Soru İngilizce ise, İngilizce yanıtla
+   - Dil tespit edemezsen, Türkçe kullan
+5. "Sen kimsin?" tarzı sorularda şu yanıtı ver:
+   * Türkçe: "Ben Dokuz Eylül Üniversitesi'nin dijital asistanıyım. Üniversitemizle ilgili sorularınıza yardımcı olmak için buradayım. Size nasıl yardımcı olabilirim?"
+   * İngilizce: "I am the digital assistant of Dokuz Eylül University. I'm here to help with your questions about our university. How can I assist you?"
+6. Yanıtlarını Markdown formatında ve açık paragraflar halinde sun.
+7. Context'teki bilgileri doğrudan kullan, kendi yorumunu katma."""
 
-RULES:
-1. ALWAYS base your answers on the information in the provided "Context" section. DO NOT USE information outside the context.
-2. If the context does not contain enough information to answer the question, politely state that the information is not available or that you cannot assist. DO NOT GUESS.
-3. Carefully analyze the user's question and the relevant text. Provide a detailed and comprehensive answer.
-4. Generate your answers in the language the user asked the question in (Turkish, English, etc.).
-For example:
-   - If the question is in Turkish, answer in Turkish.
-   - If the question is in English, answer in English.
-   - If the question is in any other language, answer in that language.
-   - If you cannot detect the language clearly, default to Turkish.
-5. If the user asks "Who are you?", "What are you?" or similar questions, respond as follows:
-    * In Turkish: "Ben Dokuz Eylül Üniversitesi'nin dijital asistanıyım. Üniversitemizle ilgili sorularınıza yardımcı olmak için buradayım. Size nasıl yardımcı olabilirim?"
-    * In English: "I am the digital assistant of Dokuz Eylül University. I'm here to help with your questions about our university. How can I assist you?"
-6. Remember previous conversations and shape your answers accordingly.
-7. Present your answers in Markdown format and in clear paragraphs."""
-
-    human_message_template_str = """
-Context:
+    human_message_template_str = """Context:
 {context}
 
-Chat History:
-{chat_history}
+Soru: {input}
 
-Question:
-{question}
+Yanıt:"""
 
-Answer:"""
-
-    custom_chat_prompt = ChatPromptTemplate.from_messages([
-        SystemMessagePromptTemplate.from_template(system_message_content),
-        HumanMessagePromptTemplate.from_template(human_message_template_str)
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", system_message_content),
+        ("human", human_message_template_str)
     ])
 
-    llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.3, convert_system_message_to_human=True)
-    
-    chain = ConversationalRetrievalChain.from_llm(
-        llm=llm,
-        retriever=retriever,
-        memory=memory,
-        combine_docs_chain_kwargs={"prompt": custom_chat_prompt},
-        return_source_documents=True, # Set to True if you want to see source documents
-        verbose=False
+    llm = ChatGoogleGenerativeAI(
+        model="gemini-1.5-flash", 
+        temperature=0.1,  # Lower temperature for more consistent answers
+        convert_system_message_to_human=True
     )
     
-    return chain, memory
+    # Create document chain
+    document_chain = create_stuff_documents_chain(llm, prompt)
+    
+    # Create retrieval chain
+    retrieval_chain = create_retrieval_chain(retriever, document_chain)
+    
+    return retrieval_chain
+
+# Alternative function with similarity search fallback
+def get_enhanced_retriever_results(db, query, k=8):
+    """Enhanced retrieval with multiple search strategies"""
+    try:
+        # Primary search with MMR
+        mmr_results = db.max_marginal_relevance_search(query, k=k, lambda_mult=0.7, fetch_k=20)
+        
+        # Fallback with similarity search if MMR doesn't return enough results
+        if len(mmr_results) < 3:
+            similarity_results = db.similarity_search(query, k=k)
+            # Combine and deduplicate
+            all_results = mmr_results + [doc for doc in similarity_results if doc not in mmr_results]
+            return all_results[:k]
+        
+        return mmr_results
+    except Exception as e:
+        st.warning(f"MMR search failed, falling back to similarity search: {e}")
+        return db.similarity_search(query, k=k)
 
 def main():
     st.set_page_config(page_title="DEUbot | DEU Assistant", page_icon="🎓", layout="wide")
@@ -140,6 +162,7 @@ def main():
     </style>
     """, unsafe_allow_html=True)
 
+    # Initialize session state for conversations (keeping UI history but no memory)
     if "conversations" not in st.session_state or not isinstance(st.session_state.conversations, dict):
         st.session_state.conversations = {}
 
@@ -153,10 +176,8 @@ def main():
         else:
             st.session_state.next_conversation_id = 1
 
-    if "chain" not in st.session_state:
-        st.session_state.chain = None
-    if "memory" not in st.session_state:
-        st.session_state.memory = None
+    if "rag_chain" not in st.session_state:
+        st.session_state.rag_chain = None
 
     with st.sidebar:
         st.image("Deu_logo.png", width=100)
@@ -168,13 +189,10 @@ def main():
             conv_id = st.session_state.next_conversation_id
             st.session_state.conversations[conv_id] = {
                 "title": f"Chat {conv_id}",
-                "messages": [],
-                "memory": ConversationBufferMemory(memory_key="chat_history", return_messages=True, output_key='answer')
+                "messages": []  # No memory object needed
             }
             st.session_state.active_conversation_id = conv_id
             st.session_state.next_conversation_id += 1
-            st.session_state.chain = None
-            st.session_state.memory = st.session_state.conversations[conv_id]["memory"]
             st.rerun()
 
         st.markdown("#### Chat History")
@@ -194,26 +212,30 @@ def main():
                     if st.button(f"{button_label}", key=f"conv_{conv_id}", use_container_width=True,
                                  type="secondary" if st.session_state.active_conversation_id == conv_id else "tertiary"):
                         st.session_state.active_conversation_id = conv_id
-                        st.session_state.memory = conv["memory"]
-                        st.session_state.chain = None
                         st.rerun()
+        
         st.markdown("---")
+        
+        # Database management
         if not os.path.exists(INDEX_DIRECTORY):
             st.warning("Database (index) not found.")
             if st.button("📚 Create Database", use_container_width=True):
                 if create_embeddings_from_pdfs():
                     st.success("Database created successfully!")
+                    st.session_state.rag_chain = None  # Reset chain to reload with new index
                     st.rerun()
                 else:
                     st.error("Database creation failed. Please check the PDF folder and API key.")
-        #else:
-        #    if st.button("🔄 Update Database", use_container_width=True):
-        #        if create_embeddings_from_pdfs():
-        #            st.success("Database updated successfully!")
-        #            st.rerun()
-        #        else:
-        #            st.error("Database update failed.")
+        else:
+            if st.button("🔄 Update Database", use_container_width=True):
+                if create_embeddings_from_pdfs():
+                    st.success("Database updated successfully!")
+                    st.session_state.rag_chain = None  # Reset chain to reload with new index
+                    st.rerun()
+                else:
+                    st.error("Database update failed.")
 
+    # Set active conversation if none selected
     if st.session_state.active_conversation_id is None and st.session_state.conversations:
         try:
             valid_ids = [int(k) for k in st.session_state.conversations.keys() if str(k).isdigit()]
@@ -232,62 +254,72 @@ def main():
         conv_title = current_conv_data.get("title", f"Chat {active_conv_id}")
         st.header(f"💬 {conv_title}")
 
+        # Display chat history
         for message in current_conv_data.get("messages", []):
             with st.chat_message(message["role"]):
                 st.markdown(message["content"])
 
+        # Chat input
         if prompt := st.chat_input(f"Write your message in {conv_title}..."):
             if not os.path.exists(INDEX_DIRECTORY):
                 st.error("Please create the database from the sidebar first.")
                 st.stop()
 
+            # Add user message to history
             current_conv_data.setdefault("messages", []).append({"role": "user", "content": prompt})
             with st.chat_message("user"):
                 st.markdown(prompt)
 
-            if st.session_state.chain is None or st.session_state.memory != current_conv_data["memory"]:
-                chain, memory = get_chain(current_conv_data["memory"])
-                if chain is None:
-                    st.error("Chat chain could not be created. Please check configuration and API key.")
+            # Initialize RAG chain if needed
+            if st.session_state.rag_chain is None:
+                rag_chain = get_rag_chain()
+                if rag_chain is None:
+                    st.error("RAG chain could not be created. Please check configuration and API key.")
                     st.stop()
-                st.session_state.chain = chain
-                st.session_state.memory = memory
+                st.session_state.rag_chain = rag_chain
             else:
-                chain = st.session_state.chain
+                rag_chain = st.session_state.rag_chain
 
+            # Generate response
             with st.chat_message("assistant"):
                 message_placeholder = st.empty()
                 with st.spinner("DEUbot is thinking..."):
                     try:
-                        response = chain.invoke({"question": prompt})
+                        # Use RAG chain without conversation history
+                        response = rag_chain.invoke({"input": prompt})
                         answer = response.get("answer", "No answer received.")
-                        # source_documents = response.get("source_documents") 
-                        # if source_documents:
-                        # with st.expander("Sources"):
-                        # for doc in source_documents:
-                        # st.caption(f"Page: {doc.metadata.get('page', 'Unknown')} - Content: {doc.page_content[:100]}...")
+                        
+                        # Optional: Show source documents for debugging
+                        # source_docs = response.get("context", [])
+                        # if source_docs and st.checkbox("Show Sources", key=f"sources_{len(current_conv_data['messages'])}"):
+                        #     with st.expander("Retrieved Documents"):
+                        #         for i, doc in enumerate(source_docs[:3]):  # Show top 3 sources
+                        #             st.caption(f"Source {i+1}: {doc.page_content[:200]}...")
+                        
                     except Exception as e:
                         st.error(f"An error occurred while receiving the answer: {e}")
-                        answer = "Sorry, I encountered an issue and cannot respond right now."
+                        answer = "Üzgünüm, bir hata oluştu ve şu anda yanıt veremiyorum."
 
+                # Animated response
                 full_response = ""
                 if isinstance(answer, str):
                     for chunk in answer.split():
                         full_response += chunk + " "
                         message_placeholder.markdown(full_response + "▌")
-                        time.sleep(0.05)
+                        time.sleep(0.03)  # Slightly faster animation
                     message_placeholder.markdown(full_response)
                 else:
-                    message_placeholder.markdown("Received response in an unexpected format.")
+                    message_placeholder.markdown("Beklenmeyen formatta yanıt alındı.")
 
+            # Add assistant response to history
             current_conv_data.setdefault("messages", []).append({"role": "assistant", "content": answer})
             st.session_state.conversations[active_conv_id] = current_conv_data
     else:
-        st.info("👋 Hello! I'm DEUbot. To get information about Dokuz Eylül University, please click 'Start New Chat' in the sidebar or select an existing chat.")
+        st.info("👋 Merhaba! Ben DEUbot. Dokuz Eylül Üniversitesi hakkında bilgi almak için kenar çubuğundan 'Yeni Sohbet Başlat' butonuna tıklayın veya mevcut bir sohbet seçin.")
         if not os.path.exists(PDF_DIRECTORY) or not os.listdir(PDF_DIRECTORY):
-            st.warning(f"There are no PDF files in the '{PDF_DIRECTORY}' folder. Please add your PDFs.")
+            st.warning(f"'{PDF_DIRECTORY}' klasöründe PDF dosyası bulunmuyor. Lütfen PDF'lerinizi ekleyin.")
         if not os.path.exists(INDEX_DIRECTORY):
-            st.warning("Database (FAISS index) has not been created yet. Please use the 'Create Database' button in the sidebar to generate a database from your PDFs.")
+            st.warning("Veritabanı (FAISS index) henüz oluşturulmamış. PDF'lerinizden veritabanı oluşturmak için kenar çubuktaki 'Veritabanı Oluştur' butonunu kullanın.")
 
 if __name__ == "__main__":
     main()
