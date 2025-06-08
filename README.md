@@ -1,5 +1,7 @@
 # 🤖 DEUbot – Dokuz Eylul University Information Assistant
 
+![image](https://github.com/user-attachments/assets/5cfe0a15-38ed-46ec-811e-b690724f695e)
+
 DEUbot is an AI-powered information assistant that answers questions about Dokuz Eylül University. Developed using Gemini and LangChain technologies, this application analyzes university-related documents and provides intelligent responses to user inquiries.
 
 
