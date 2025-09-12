@@ -13,69 +13,86 @@ from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTempla
 from langchain.chains import create_retrieval_chain
 from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain_core.output_parsers import StrOutputParser
+from langchain_core.embeddings import Embeddings
+import faiss
+
+import nest_asyncio
+nest_asyncio.apply()
 
 load_dotenv()
 
 INDEX_DIRECTORY = "faiss_index"
 PDF_DIRECTORY = "pdfs"
 
-# Create FAISS index from PDF files with improved chunking
-def create_embeddings_from_pdfs():
-    if not os.path.exists(PDF_DIRECTORY) or not os.listdir(PDF_DIRECTORY):
-        st.warning(f"'{PDF_DIRECTORY}' folder not found or there are no PDF files inside. Please add your PDFs to this folder.")
-        return False
-    with st.spinner(f"Creating embeddings from PDFs in the '{PDF_DIRECTORY}' folder... This may take some time."):
-        try:
-            loader = DirectoryLoader(PDF_DIRECTORY, glob="*.pdf", loader_cls=PyPDFLoader, show_progress=True, use_multithreading=False)
-            documents = loader.load()
-            if not documents:
-                st.error("Failed to load PDF files or their contents are empty.")
-                return False
-        except Exception as e:
-            st.error(f"An error occurred while loading PDF files: {e}")
-            return False
 
-        # Improved text splitting for better retrieval
-        text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=800,  # Smaller chunks for better retrieval
-            chunk_overlap=200,  # More overlap for context preservation
-            length_function=len,
-            separators=["\n\n", "\n", " ", ""]
-        )
-        texts = text_splitter.split_documents(documents)
-        if not texts:
-            st.error("Could not extract text from PDFs.")
-            return False
+# def create_embeddings_from_pdfs():
+#     if not os.path.exists(PDF_DIRECTORY) or not os.listdir(PDF_DIRECTORY):
+#         st.warning(f"'{PDF_DIRECTORY}' folder not found or there are no PDF files inside. Please add your PDFs to this folder.")
+#         return False
+#     with st.spinner(f"Creating embeddings from PDFs in the '{PDF_DIRECTORY}' folder... This may take some time."):
+#         try:
+#             loader = DirectoryLoader(PDF_DIRECTORY, glob="*.pdf", loader_cls=PyPDFLoader, show_progress=True, use_multithreading=False)
+#             documents = loader.load()
+#             if not documents:
+#                 st.error("Failed to load PDF files or their contents are empty.")
+#                 return False
+#         except Exception as e:
+#             st.error(f"An error occurred while loading PDF files: {e}")
+#             return False
+#
+#         text_splitter = RecursiveCharacterTextSplitter(
+#             chunk_size=800,
+#             chunk_overlap=200,
+#             length_function=len,
+#             separators=["\n\n", "\n", " ", ""]
+#         )
+#         texts = text_splitter.split_documents(documents)
+#         if not texts:
+#             st.error("Could not extract text from PDFs.")
+#             return False
+#
+#         try:
+#             embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+#             db = FAISS.from_documents(texts, embeddings)
+#             db.save_local(INDEX_DIRECTORY)
+#             st.success("Embeddings were successfully created and saved!")
+#         except Exception as e:
+#             st.error(f"An error occurred while creating or saving embeddings: {e}")
+#             return False
+#     return True
 
-        try:
-            embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
-            db = FAISS.from_documents(texts, embeddings)
-            db.save_local(INDEX_DIRECTORY)
-            st.success("Embeddings were successfully created and saved!")
-        except Exception as e:
-            st.error(f"An error occurred while creating or saving embeddings: {e}")
-            return False
-    return True
+class DummyEmbeddings(Embeddings):
+    """API çağrısı yapmayan dummy embeddings sınıfı - sadece mevcut index'i yüklemek için"""
+    def embed_documents(self, texts):
+        # Mevcut index'i yüklemek için dummy embedding döndür
+        # Gerçek embedding'ler zaten index'te mevcut
+        return [[0.0] * 768 for _ in texts]  # Google embedding boyutu genellikle 768
+    
+    def embed_query(self, text):
+        # Mevcut index'i yüklemek için dummy embedding döndür
+        return [0.0] * 768
 
-# Create RAG chain without conversational memory for better performance
 def get_rag_chain():
-    embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
-    if not os.path.exists(INDEX_DIRECTORY):
-        st.error("FAISS index file not found. Please create embeddings first.")
+    index_file_path = os.path.join(INDEX_DIRECTORY, "index.faiss")
+    if not os.path.exists(index_file_path):
+        st.error(f"FAISS index not found at {index_file_path}.")
         return None
+
     try:
+        # API çağrısı yapmayan dummy embeddings kullan
+        # Mevcut index'teki embedding'ler zaten mevcut
+        embeddings = DummyEmbeddings()
         db = FAISS.load_local(INDEX_DIRECTORY, embeddings, allow_dangerous_deserialization=True)
     except Exception as e:
-        st.error(f"Error loading FAISS index: {e}. The index file might be corrupted. Try recreating it from the sidebar.")
+        st.error(f"Error loading FAISS index: {e}.")
         return None
 
-    # Enhanced retriever with multiple search types
     retriever = db.as_retriever(
-        search_type="mmr",  # Maximum Marginal Relevance for diverse results
+        search_type="mmr",
         search_kwargs={
-            "k": 8,  # Retrieve more documents
-            "lambda_mult": 0.7,  # Balance between relevance and diversity
-            "fetch_k": 20  # Fetch more candidates before filtering
+            "k": 8,
+            "lambda_mult": 0.7,
+            "fetch_k": 20
         }
     )
 
@@ -86,12 +103,12 @@ def get_rag_chain():
 2. Context'te yeterli bilgi yoksa, kibarca bilginin mevcut olmadığını belirt. TAHMİN YAPMA.
 3. Kullanıcının sorusunu dikkatlice analiz et ve context'teki ilgili bilgileri kapsamlı şekilde yanıtla.
 4. Yanıtını kullanıcının sorusunun dilinde ver:
-   - Soru Türkçe ise, Türkçe yanıtla
-   - Soru İngilizce ise, İngilizce yanıtla
-   - Dil tespit edemezsen, Türkçe kullan
+    - Soru Türkçe ise, Türkçe yanıtla
+    - Soru İngilizce ise, İngilizce yanıtla
+    - Dil tespit edemezsen, Türkçe kullan
 5. "Sen kimsin?" tarzı sorularda şu yanıtı ver:
-   * Türkçe: "Ben Dokuz Eylül Üniversitesi'nin dijital asistanıyım. Üniversitemizle ilgili sorularınıza yardımcı olmak için buradayım. Size nasıl yardımcı olabilirim?"
-   * İngilizce: "I am the digital assistant of Dokuz Eylül University. I'm here to help with your questions about our university. How can I assist you?"
+    * Türkçe: "Ben Dokuz Eylül Üniversitesi'nin dijital asistanıyım. Üniversitemizle ilgili sorularınıza yardımcı olmak için buradayım. Size nasıl yardımcı olabilirim?"
+    * İngilizce: "I am the digital assistant of Dokuz Eylül University. I'm here to help with your questions about our university. How can I assist you?"
 6. Yanıtlarını Markdown formatında ve açık paragraflar halinde sun.
 7. Context'teki bilgileri doğrudan kullan, kendi yorumunu katma."""
 
@@ -108,74 +125,40 @@ Yanıt:"""
     ])
 
     llm = ChatGoogleGenerativeAI(
-        model="gemini-1.5-flash", 
-        temperature=0.1,  # Lower temperature for more consistent answers
+        model="gemini-1.5-flash",
+        temperature=0.1,
         convert_system_message_to_human=True
     )
-    
-    # Create document chain
-    document_chain = create_stuff_documents_chain(llm, prompt)
-    
-    # Create retrieval chain
-    retrieval_chain = create_retrieval_chain(retriever, document_chain)
-    
-    return retrieval_chain
 
-# Alternative function with similarity search fallback
-def get_enhanced_retriever_results(db, query, k=8):
-    """Enhanced retrieval with multiple search strategies"""
-    try:
-        # Primary search with MMR
-        mmr_results = db.max_marginal_relevance_search(query, k=k, lambda_mult=0.7, fetch_k=20)
-        
-        # Fallback with similarity search if MMR doesn't return enough results
-        if len(mmr_results) < 3:
-            similarity_results = db.similarity_search(query, k=k)
-            # Combine and deduplicate
-            all_results = mmr_results + [doc for doc in similarity_results if doc not in mmr_results]
-            return all_results[:k]
-        
-        return mmr_results
-    except Exception as e:
-        st.warning(f"MMR search failed, falling back to similarity search: {e}")
-        return db.similarity_search(query, k=k)
+    document_chain = create_stuff_documents_chain(llm, prompt)
+    retrieval_chain = create_retrieval_chain(retriever, document_chain)
+    return retrieval_chain
 
 def main():
     st.set_page_config(page_title="DEUbot | DEU Assistant", page_icon="🎓", layout="wide")
 
     if "GOOGLE_API_KEY" not in os.environ or not os.environ["GOOGLE_API_KEY"]:
-        st.error("GOOGLE_API_KEY not found or empty in the .env file. Please add your API key and make sure it is valid.")
+        st.error("GOOGLE_API_KEY not found or empty in the .env file.")
         st.markdown("You can get your API key from [Google AI Studio](https://aistudio.google.com/app/apikey).")
         st.stop()
 
     st.markdown("""
     <style>
-        .stApp {
-            /* background-color: #f0f2f6; */
-        }
-        .stChatInputContainer > div > div > textarea {
-            background-color: #ffffff;
-        }
+        .stChatInputContainer > div > div > textarea { background-color: #ffffff; }
         #MainMenu {visibility: hidden;}
         footer {visibility: hidden;}
         header {visibility: hidden;}
     </style>
     """, unsafe_allow_html=True)
 
-    # Initialize session state for conversations (keeping UI history but no memory)
+    # Session state init
     if "conversations" not in st.session_state or not isinstance(st.session_state.conversations, dict):
         st.session_state.conversations = {}
-
     if "active_conversation_id" not in st.session_state:
         st.session_state.active_conversation_id = None
-
     if "next_conversation_id" not in st.session_state:
-        if st.session_state.conversations:
-            valid_ids = [int(k) for k in st.session_state.conversations.keys() if str(k).isdigit()]
-            st.session_state.next_conversation_id = max(valid_ids) + 1 if valid_ids else 1
-        else:
-            st.session_state.next_conversation_id = 1
-
+        valid_ids = [int(k) for k in st.session_state.conversations.keys() if str(k).isdigit()] if st.session_state.conversations else []
+        st.session_state.next_conversation_id = max(valid_ids) + 1 if valid_ids else 1
     if "rag_chain" not in st.session_state:
         st.session_state.rag_chain = None
 
@@ -187,10 +170,7 @@ def main():
 
         if st.button("💬 Start New Chat", use_container_width=True, type="primary"):
             conv_id = st.session_state.next_conversation_id
-            st.session_state.conversations[conv_id] = {
-                "title": f"Chat {conv_id}",
-                "messages": []  # No memory object needed
-            }
+            st.session_state.conversations[conv_id] = {"title": f"Chat {conv_id}", "messages": []}
             st.session_state.active_conversation_id = conv_id
             st.session_state.next_conversation_id += 1
             st.rerun()
@@ -199,12 +179,7 @@ def main():
         if not st.session_state.conversations:
             st.caption("No chats started yet.")
         else:
-            try:
-                sorted_conv_ids = sorted([int(k) for k in st.session_state.conversations.keys() if str(k).isdigit()], reverse=True)
-            except ValueError:
-                st.warning("There is an inconsistency in chat IDs.")
-                sorted_conv_ids = []
-
+            sorted_conv_ids = sorted([int(k) for k in st.session_state.conversations.keys() if str(k).isdigit()], reverse=True)
             for conv_id in sorted_conv_ids:
                 conv = st.session_state.conversations.get(conv_id)
                 if conv:
@@ -213,64 +188,33 @@ def main():
                                  type="secondary" if st.session_state.active_conversation_id == conv_id else "tertiary"):
                         st.session_state.active_conversation_id = conv_id
                         st.rerun()
-        
-        st.markdown("---")
-        
-        # Database management
-        if not os.path.exists(INDEX_DIRECTORY):
-            st.warning("Database (index) not found.")
-            if st.button("📚 Create Database", use_container_width=True):
-                if create_embeddings_from_pdfs():
-                    st.success("Database created successfully!")
-                    st.session_state.rag_chain = None  # Reset chain to reload with new index
-                    st.rerun()
-                else:
-                    st.error("Database creation failed. Please check the PDF folder and API key.")
-        else:
-            if st.button("🔄 Update Database", use_container_width=True):
-                if create_embeddings_from_pdfs():
-                    st.success("Database updated successfully!")
-                    st.session_state.rag_chain = None  # Reset chain to reload with new index
-                    st.rerun()
-                else:
-                    st.error("Database update failed.")
 
-    # Set active conversation if none selected
+        st.markdown("---")
+        index_file_path = os.path.join(INDEX_DIRECTORY, "index.faiss")
+        if not os.path.exists(index_file_path):
+            st.warning("Database (FAISS index) not found. Please ensure index.faiss exists in the faiss_index folder.")
+        else:
+            st.success("Database found. Using existing FAISS index.")
+
     if st.session_state.active_conversation_id is None and st.session_state.conversations:
-        try:
-            valid_ids = [int(k) for k in st.session_state.conversations.keys() if str(k).isdigit()]
-            if valid_ids:
-                st.session_state.active_conversation_id = max(valid_ids)
-        except ValueError:
-            pass
+        valid_ids = [int(k) for k in st.session_state.conversations.keys() if str(k).isdigit()]
+        if valid_ids:
+            st.session_state.active_conversation_id = max(valid_ids)
 
     active_conv_id = st.session_state.active_conversation_id
-    current_conv_data = None
-
-    if active_conv_id is not None and active_conv_id in st.session_state.conversations:
-        current_conv_data = st.session_state.conversations[active_conv_id]
+    current_conv_data = st.session_state.conversations.get(active_conv_id) if active_conv_id else None
 
     if current_conv_data:
-        conv_title = current_conv_data.get("title", f"Chat {active_conv_id}")
-        st.header(f"💬 {conv_title}")
-
-        # Display chat history
+        st.header(f"💬 {current_conv_data.get('title', f'Chat {active_conv_id}')}")
         for message in current_conv_data.get("messages", []):
             with st.chat_message(message["role"]):
                 st.markdown(message["content"])
 
-        # Chat input
-        if prompt := st.chat_input(f"Write your message in {conv_title}..."):
-            if not os.path.exists(INDEX_DIRECTORY):
-                st.error("Please create the database from the sidebar first.")
-                st.stop()
-
-            # Add user message to history
+        if prompt := st.chat_input("Type your message..."):
             current_conv_data.setdefault("messages", []).append({"role": "user", "content": prompt})
             with st.chat_message("user"):
                 st.markdown(prompt)
 
-            # Initialize RAG chain if needed
             if st.session_state.rag_chain is None:
                 rag_chain = get_rag_chain()
                 if rag_chain is None:
@@ -280,37 +224,25 @@ def main():
             else:
                 rag_chain = st.session_state.rag_chain
 
-            # Generate response
             with st.chat_message("assistant"):
                 message_placeholder = st.empty()
                 with st.spinner("DEUbot is thinking..."):
                     try:
-                        # Use RAG chain without conversation history
                         response = rag_chain.invoke({"input": prompt})
                         answer = response.get("answer", "No answer received.")
-                        
-                        # Optional: Show source documents for debugging
-                        # source_docs = response.get("context", [])
-                        # if source_docs and st.checkbox("Show Sources", key=f"sources_{len(current_conv_data['messages'])}"):
-                        #     with st.expander("Retrieved Documents"):
-                        #         for i, doc in enumerate(source_docs[:3]):  # Show top 3 sources
-                        #             st.caption(f"Source {i+1}: {doc.page_content[:200]}...")
-                        
                     except Exception as e:
                         st.error(f"An error occurred while receiving the answer: {e}")
                         answer = "Üzgünüm, bir hata oluştu ve şu anda yanıt veremiyorum."
 
-                # Animated response
                 full_response = ""
                 if isinstance(answer, str):
                     for chunk in answer.split():
                         full_response += chunk + " "
                         message_placeholder.markdown(full_response + "▌")
-                        time.sleep(0.03)  # Slightly faster animation
+                        time.sleep(0.03)
                     message_placeholder.markdown(full_response)
                 else:
-                    message_placeholder.markdown("Beklenmeyen formatta yanıt alındı.")
-
+                    message_placeholder.markdown("Beklenmeyen formatta yanıt alındı.")       
             # Add assistant response to history
             current_conv_data.setdefault("messages", []).append({"role": "assistant", "content": answer})
             st.session_state.conversations[active_conv_id] = current_conv_data
