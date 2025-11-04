@@ -8,9 +8,9 @@ import os
 import time
 import shutil
 from langchain_core.prompts import ChatPromptTemplate
-from langchain.chains.retrieval import create_retrieval_chain
-from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain_core.embeddings import Embeddings
+from langchain_core.runnables import RunnablePassthrough
+from langchain_core.output_parsers import StrOutputParser
 import faiss
 
 import nest_asyncio
@@ -109,27 +109,32 @@ def get_rag_chain():
 6. Yanıtlarını Markdown formatında ve açık paragraflar halinde sun.
 7. Context'teki bilgileri doğrudan kullan, kendi yorumunu katma."""
 
-    human_message_template_str = """Context:
-{context}
-
-Soru: {input}
-
-Yanıt:"""
+    def format_docs(docs):
+        return "\n\n".join(doc.page_content for doc in docs)
 
     prompt = ChatPromptTemplate.from_messages([
         ("system", system_message_content),
-        ("human", human_message_template_str)
+        ("human", "Context:\n{context}\n\nSoru: {input}\n\nYanıt:")
     ])
 
     llm = ChatGoogleGenerativeAI(
-        model="gemini-1.5-flash",
+        model="gemini-flash-latest",
         temperature=0.1,
         convert_system_message_to_human=True
     )
 
-    document_chain = create_stuff_documents_chain(llm, prompt)
-    retrieval_chain = create_retrieval_chain(retriever, document_chain)
-    return retrieval_chain
+    # Modern RAG chain yapısı
+    rag_chain = (
+        {
+            "context": retriever | format_docs,
+            "input": RunnablePassthrough()
+        }
+        | prompt
+        | llm
+        | StrOutputParser()
+    )
+    
+    return rag_chain
 
 def main():
     st.set_page_config(page_title="DEUbot | DEU Assistant", page_icon="🎓", layout="wide")
@@ -225,8 +230,7 @@ def main():
                 message_placeholder = st.empty()
                 with st.spinner("DEUbot is thinking..."):
                     try:
-                        response = rag_chain.invoke({"input": prompt})
-                        answer = response.get("answer", "No answer received.")
+                        answer = rag_chain.invoke(prompt)
                     except Exception as e:
                         st.error(f"An error occurred while receiving the answer: {e}")
                         answer = "Üzgünüm, bir hata oluştu ve şu anda yanıt veremiyorum."
