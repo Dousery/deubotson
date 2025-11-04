@@ -4,7 +4,6 @@ from langchain_community.vectorstores import FAISS
 #from langchain.chains import ConversationalRetrievalChain
 from langchain_community.document_loaders import PyPDFLoader, DirectoryLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain.memory import ConversationBufferMemory
 from dotenv import load_dotenv
 import os
 import time
